@@ -135,11 +135,17 @@ Add your screenshots here after uploading them to the repository.
 
 ### 4. Server routing through ALB
 
-![Server routing through ALB](docs/images/server-routing-alb.png)
+![Server routing through ALB (SERVER 1)](docs/images/server-routing-alb-1.png)
+
+![Server routing through ALB (SERVER 2)](docs/images/server-routing-alb-2.png)
 
 ### 5. Private instance with bastion host
+![1. SSH to public instance (bastian host)](docs/images/public-instance-bastion-host.png)
 
-![Private instance with bastion host](docs/images/private-instance-bastion-host.png)
+![2. SSH to private instance with bastion host](docs/images/private-instance-bastion-host.png)
+
+![3. Test the private server ](docs/images/private-server-test.png)
+
 
 ## Suggested Screenshot Checklist
 
