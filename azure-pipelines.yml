@@ -15,25 +15,18 @@ trigger:
     include:
       - main
   # Pipeline auto-triggers only on pushes to main.
-  # Feature branches won't trigger a run unless you add them here.
 
 variables:
   - group: aws-terraform-creds
-    # Pulls in AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
-    # from the Library variable group created earlier in Azure DevOps.
-    # Secrets are masked in logs automatically.
+    # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
   - name: TF_ROOT_DIR
     value: 'environments/dev'
-    # This is the actual root module Terraform commands run from.
-    # NOT the repo root, since modules/ has no backend config of its own.
+    # Actual root module Terraform commands run from.
 
 stages:
 
 # =====================================================================
 # STAGE 1: VALIDATE
-# Purpose: catch syntax errors and provider/config mistakes early.
-# Runs with -backend=false so it doesn't need AWS credentials yet,
-# this stage is purely a static check on the HCL itself.
 # =====================================================================
 - stage: Validate
   displayName: 'Terraform Validate'
@@ -49,31 +42,21 @@ stages:
             sudo mv terraform /usr/local/bin/
             terraform version
           displayName: 'Install Terraform'
-          # Microsoft-hosted agents are ephemeral, so Terraform has to be
-          # installed fresh on every single run. Nothing persists between runs.
 
         - script: |
             cd $(TF_ROOT_DIR)
             terraform init -backend=false
             terraform validate
           displayName: 'terraform init & validate'
-          # -backend=false: we don't want to touch the real S3 state yet,
-          # this stage only checks that the HCL is syntactically valid
-          # and that module references resolve correctly.
+          # -backend=false: no AWS creds needed, no tfvars needed either
+          # since validate only checks HCL syntax, not variable values.
 
 # =====================================================================
 # STAGE 2: SECURITY SCAN (Checkov)
-# Purpose: static security analysis of the Terraform code, BEFORE
-# anything is planned or applied against real AWS infrastructure.
-# This is the "shift-left" gate: if this stage fails, the pipeline
-# stops here. Plan and Apply never execute.
 # =====================================================================
 - stage: SecurityScan
   displayName: 'Checkov Security Scan'
   dependsOn: Validate
-  # Only runs if Validate succeeded. If Validate fails, this stage
-  # is skipped entirely, Azure DevOps handles that automatically
-  # via the dependsOn chain, no extra logic needed.
   jobs:
     - job: CheckovJob
       pool:
@@ -86,21 +69,11 @@ stages:
         - script: |
             checkov -d . --framework terraform --compact
           displayName: 'Run Checkov scan'
-          # Scans from the REPO ROOT (not $(TF_ROOT_DIR)), so it checks
-          # both environments/dev AND modules/. A misconfiguration inside
-          # modules/security_group/main.tf needs to be caught here too,
-          # not just issues in the dev environment's own files.
-          #
-          # IMPORTANT: no `continue-on-error` and no `|| true` here.
-          # Checkov exits non-zero if ANY check fails, and that non-zero
-          # exit code is what fails this pipeline stage and blocks
-          # everything downstream. This is the enforcement mechanism
-          # for the "blocked deployment on failed scan" requirement.
+          # No continue-on-error, no || true.
+          # Non-zero exit here fails this stage and blocks Plan + Apply.
 
 # =====================================================================
 # STAGE 3: PLAN
-# Purpose: generate an execution plan and save it as an artifact.
-# Only reachable if Validate AND SecurityScan both passed.
 # =====================================================================
 - stage: Plan
   displayName: 'Terraform Plan'
@@ -117,6 +90,18 @@ stages:
             sudo mv terraform /usr/local/bin/
           displayName: 'Install Terraform'
 
+        - task: DownloadSecureFile@1
+          name: tfvarsFile
+          inputs:
+            secureFile: 'terraform.tfvars'
+          displayName: 'Download terraform.tfvars'
+
+        - script: |
+            cp $(tfvarsFile.secureFilePath) $(System.DefaultWorkingDirectory)/$(TF_ROOT_DIR)/terraform.tfvars
+          displayName: 'Place tfvars into working directory'
+          # Terraform auto-loads terraform.tfvars if present in the
+          # working directory, no -var-file flag needed.
+
         - script: |
             cd $(TF_ROOT_DIR)
             terraform init
@@ -126,25 +111,12 @@ stages:
             AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
             AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
             AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
-          # This init is a REAL init (no -backend=false), it connects to
-          # your actual S3 backend + DynamoDB lock table, since plan needs
-          # to compare against real state.
-          # AWS credentials are injected here for the first time, Validate
-          # and SecurityScan never needed them.
 
         - publish: $(System.DefaultWorkingDirectory)/$(TF_ROOT_DIR)/tfplan
           artifact: tfplan
-          # Saves the exact binary plan file as a pipeline artifact.
-          # Apply stage downloads THIS exact plan rather than re-running
-          # `terraform plan`, this avoids drift between what was reviewed
-          # and what actually gets applied.
 
 # =====================================================================
 # STAGE 4: APPLY (manual approval required)
-# Purpose: apply the reviewed plan, but only after a human approves it.
-# Uses a `deployment` job tied to the 'production' Environment, which
-# has an Approval check configured in Azure DevOps (Pipelines > Environments).
-# The pipeline will PAUSE here and wait for approval before continuing.
 # =====================================================================
 - stage: Apply
   displayName: 'Terraform Apply'
@@ -152,9 +124,6 @@ stages:
   jobs:
     - deployment: ApplyJob
       environment: 'production'
-      # This line is what triggers the approval gate. Without a
-      # `deployment` job type bound to an environment, there is no
-      # manual approval step, it would just apply automatically.
       pool:
         vmImage: 'ubuntu-latest'
       strategy:
@@ -168,10 +137,22 @@ stages:
                   sudo mv terraform /usr/local/bin/
                 displayName: 'Install Terraform'
 
+              - task: DownloadSecureFile@1
+                name: tfvarsFile
+                inputs:
+                  secureFile: 'terraform.tfvars'
+                displayName: 'Download terraform.tfvars'
+
+              - script: |
+                  cp $(tfvarsFile.secureFilePath) $(System.DefaultWorkingDirectory)/$(TF_ROOT_DIR)/terraform.tfvars
+                displayName: 'Place tfvars into working directory'
+                # Fresh agent for this stage too, nothing carried over
+                # from the Plan stage's filesystem, so this must be
+                # repeated here.
+
               - download: current
                 artifact: tfplan
-                # Pulls down the exact plan artifact published in the
-                # Plan stage. Lands under $(Pipeline.Workspace)/tfplan/
+                displayName: 'Download plan artifact'
 
               - script: |
                   cd $(TF_ROOT_DIR)
@@ -182,8 +163,5 @@ stages:
                   AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
                   AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
                   AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
-                # -auto-approve here is safe because the REAL approval
-                # already happened at the Azure DevOps environment gate.
-                # This flag just skips Terraform's own interactive
-                # console prompt, which has no way to respond to on a
-                # non-interactive CI agent anyway.
+                # -auto-approve is safe here because the real human
+                # approval already happened at the environment gate.
