@@ -1,0 +1,62 @@
+trigger: none
+# No automatic trigger. This pipeline only runs when someone
+# manually clicks "Run pipeline." Destroy should never happen
+# as a side effect of a routine commit.
+
+variables:
+  - group: aws-terraform-creds
+  - name: TF_ROOT_DIR
+    value: 'environments/dev'
+
+stages:
+
+- stage: Destroy
+  displayName: 'Terraform Destroy'
+  jobs:
+    - deployment: DestroyJob
+      environment: 'production'
+      # Reuses the same approval gate as your apply pipeline.
+      pool:
+        vmImage: 'ubuntu-latest'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+                displayName: 'Checkout repo'
+
+              - script: |
+                  curl -o terraform.zip https://releases.hashicorp.com/terraform/1.9.0/terraform_1.9.0_linux_amd64.zip
+                  sudo apt-get install -y unzip
+                  unzip terraform.zip
+                  sudo mv terraform /usr/local/bin/
+                displayName: 'Install Terraform'
+
+              - task: DownloadSecureFile@1
+                name: tfvarsFile
+                inputs:
+                  secureFile: 'terraform.tfvars'
+                displayName: 'Download terraform.tfvars'
+
+              - script: |
+                  cp $(tfvarsFile.secureFilePath) $(System.DefaultWorkingDirectory)/$(TF_ROOT_DIR)/terraform.tfvars
+                displayName: 'Place tfvars into working directory'
+
+              - script: |
+                  cd $(TF_ROOT_DIR)
+                  terraform init
+                  terraform plan -destroy -out=destroyplan
+                displayName: 'terraform plan -destroy'
+                env:
+                  AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                  AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                  AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
+
+              - script: |
+                  cd $(TF_ROOT_DIR)
+                  terraform apply destroyplan
+                displayName: 'terraform destroy (via apply of destroy plan)'
+                env:
+                  AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                  AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                  AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)

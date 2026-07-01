@@ -12,7 +12,7 @@ resource "aws_lb" "this" {
     var.public_subnet_az2_id
   ]
 
-  enable_deletion_protection = true
+  enable_deletion_protection = false
   drop_invalid_header_fields = true
 
   tags = {
