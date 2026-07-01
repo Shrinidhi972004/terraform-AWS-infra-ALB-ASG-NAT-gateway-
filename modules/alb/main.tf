@@ -11,7 +11,7 @@ resource "aws_lb" "this" {
     var.public_subnet_az1_id,
     var.public_subnet_az2_id
   ]
-
+  #checkov:skip=CKV_AWS_150:Deletion protection disabled intentionally for planned infrastructure teardown
   enable_deletion_protection = false
   drop_invalid_header_fields = true
 
