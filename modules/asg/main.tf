@@ -9,6 +9,20 @@ resource "aws_launch_template" "this" {
     security_groups = [var.ec2_sg_id]
   }
 
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      encrypted = true
+    }
+  }
+
+
   user_data = base64encode(<<-EOF
 #!/bin/bash
 apt update -y
