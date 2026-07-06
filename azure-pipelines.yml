@@ -1,5 +1,6 @@
 # =====================================================================
 # Azure DevOps Pipeline: Terraform CI/CD for AWS Infrastructure
+# Auth model: OIDC / Workload Identity Federation (no static AWS keys)
 # =====================================================================
 # Repo structure this pipeline assumes:
 #   terraform-modules/
@@ -8,20 +9,28 @@
 #   └── modules/             <- reusable child modules (vpc, alb, asg, etc.)
 #                                referenced by environments/dev/main.tf,
 #                                Checkov scans this too, so scan runs from repo root
+#
+# Prerequisites for this pipeline to work:
+#   1. AWS Toolkit for Azure DevOps extension installed on the org
+#   2. Service connection created: "aws-oidc-sc" (Workload Identity federation)
+#   3. AWS IAM OIDC provider + trust policy configured to trust that
+#      service connection's issuer/subject claims
+#   4. terraform.tfvars uploaded as a Secure File named 'terraform.tfvars'
 # =====================================================================
 
 trigger:
   branches:
     include:
       - main
-  # Pipeline auto-triggers only on pushes to main.
 
 variables:
-  - group: aws-terraform-creds
-    # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
   - name: TF_ROOT_DIR
     value: 'environments/dev'
-    # Actual root module Terraform commands run from.
+  - name: AWS_DEFAULT_REGION
+    value: 'ap-south-1'
+  - name: AWS_SERVICE_CONNECTION
+    value: 'aws-oidc-sc'
+    # Matches the service connection you created in AZDO.
 
 stages:
 
@@ -48,8 +57,6 @@ stages:
             terraform init -backend=false
             terraform validate
           displayName: 'terraform init & validate'
-          # -backend=false: no AWS creds needed, no tfvars needed either
-          # since validate only checks HCL syntax, not variable values.
 
 # =====================================================================
 # STAGE 2: SECURITY SCAN (Checkov)
@@ -69,11 +76,9 @@ stages:
         - script: |
             checkov -d . --framework terraform --compact
           displayName: 'Run Checkov scan'
-          # No continue-on-error, no || true.
-          # Non-zero exit here fails this stage and blocks Plan + Apply.
 
 # =====================================================================
-# STAGE 3: PLAN
+# STAGE 3: PLAN (OIDC-authenticated)
 # =====================================================================
 - stage: Plan
   displayName: 'Terraform Plan'
@@ -99,24 +104,31 @@ stages:
         - script: |
             cp $(tfvarsFile.secureFilePath) $(System.DefaultWorkingDirectory)/$(TF_ROOT_DIR)/terraform.tfvars
           displayName: 'Place tfvars into working directory'
-          # Terraform auto-loads terraform.tfvars if present in the
-          # working directory, no -var-file flag needed.
 
-        - script: |
-            cd $(TF_ROOT_DIR)
-            terraform init
-            terraform plan -out=tfplan
-          displayName: 'terraform init & plan'
-          env:
-            AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-            AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-            AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
+        - task: AWSCLI@1
+          displayName: 'Validate AWS OIDC Authentication'
+          inputs:
+            awsCredentials: '$(AWS_SERVICE_CONNECTION)'
+            regionName: '$(AWS_DEFAULT_REGION)'
+            awsCommand: 'sts'
+            awsSubCommand: 'get-caller-identity'
+
+        - task: AWSShellScript@1
+          inputs:
+            awsCredentials: '$(AWS_SERVICE_CONNECTION)'
+            regionName: '$(AWS_DEFAULT_REGION)'
+            scriptType: 'inline'
+            inlineScript: |
+              cd $(TF_ROOT_DIR)
+              terraform init
+              terraform plan -out=tfplan
+          displayName: 'terraform init & plan (OIDC)'
 
         - publish: $(System.DefaultWorkingDirectory)/$(TF_ROOT_DIR)/tfplan
           artifact: tfplan
 
 # =====================================================================
-# STAGE 4: APPLY (manual approval required)
+# STAGE 4: APPLY (manual approval required, OIDC-authenticated)
 # =====================================================================
 - stage: Apply
   displayName: 'Terraform Apply'
@@ -154,12 +166,21 @@ stages:
                 artifact: tfplan
                 displayName: 'Download plan artifact'
 
-              - script: |
-                  cd $(TF_ROOT_DIR)
-                  terraform init
-                  terraform apply -auto-approve $(Pipeline.Workspace)/tfplan/tfplan
-                displayName: 'terraform apply'
-                env:
-                  AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                  AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-                  AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
+              - task: AWSCLI@1
+                displayName: 'Validate AWS OIDC Authentication'
+                inputs:
+                  awsCredentials: '$(AWS_SERVICE_CONNECTION)'
+                  regionName: '$(AWS_DEFAULT_REGION)'
+                  awsCommand: 'sts'
+                  awsSubCommand: 'get-caller-identity'
+
+              - task: AWSShellScript@1
+                inputs:
+                  awsCredentials: '$(AWS_SERVICE_CONNECTION)'
+                  regionName: '$(AWS_DEFAULT_REGION)'
+                  scriptType: 'inline'
+                  inlineScript: |
+                    cd $(TF_ROOT_DIR)
+                    terraform init
+                    terraform apply -auto-approve $(Pipeline.Workspace)/tfplan/tfplan
+                displayName: 'terraform apply (OIDC)'
