@@ -1,21 +1,22 @@
 trigger: none
-# No automatic trigger. This pipeline only runs when someone
-# manually clicks "Run pipeline." Destroy should never happen
-# as a side effect of a routine commit.
+# Manual-only, same as before. Even more important with OIDC,
+# since temporary credentials are still powerful for their lifetime.
 
 variables:
-  - group: aws-terraform-creds
   - name: TF_ROOT_DIR
     value: 'environments/dev'
+  - name: AWS_ROLE_ARN
+    value: 'arn:aws:iam::009882533113:role/azure-devops-terraform-oidc-role'
+  - name: AWS_REGION
+    value: 'ap-south-1'
 
 stages:
 
 - stage: Destroy
-  displayName: 'Terraform Destroy'
+  displayName: 'Terraform Destroy (OIDC)'
   jobs:
     - deployment: DestroyJob
       environment: 'production'
-      # Reuses the same approval gate as your apply pipeline.
       pool:
         vmImage: 'ubuntu-latest'
       strategy:
@@ -42,6 +43,30 @@ stages:
                   cp $(tfvarsFile.secureFilePath) $(System.DefaultWorkingDirectory)/$(TF_ROOT_DIR)/terraform.tfvars
                 displayName: 'Place tfvars into working directory'
 
+              - task: AzureCLI@2
+                displayName: 'Fetch OIDC token and assume AWS role'
+                inputs:
+                  azureSubscription: '<your-workload-identity-service-connection-name>'
+                  scriptType: 'bash'
+                  scriptLocation: 'inlineScript'
+                  inlineScript: |
+                    # Get the OIDC ID token issued to this pipeline job
+                    ID_TOKEN=$(curl -s -H "Authorization: Bearer $(System.AccessToken)" \
+                      "$(System.CollectionUri)$(System.TeamProject)/_apis/distributedtask/hubs/build/plans/$(System.PlanId)/jobs/$(System.JobId)/oidctoken?api-version=7.1-preview.1&serviceConnectionId=<service-connection-id>" \
+                      | jq -r '.oidcToken')
+
+                    # Exchange it for temporary AWS credentials
+                    CREDS=$(aws sts assume-role-with-web-identity \
+                      --role-arn $(AWS_ROLE_ARN) \
+                      --role-session-name "ado-destroy-$(Build.BuildId)" \
+                      --web-identity-token "$ID_TOKEN" \
+                      --duration-seconds 3600 \
+                      --query 'Credentials' --output json)
+
+                    echo "##vso[task.setvariable variable=AWS_ACCESS_KEY_ID;issecret=true]$(echo $CREDS | jq -r '.AccessKeyId')"
+                    echo "##vso[task.setvariable variable=AWS_SECRET_ACCESS_KEY;issecret=true]$(echo $CREDS | jq -r '.SecretAccessKey')"
+                    echo "##vso[task.setvariable variable=AWS_SESSION_TOKEN;issecret=true]$(echo $CREDS | jq -r '.SessionToken')"
+
               - script: |
                   cd $(TF_ROOT_DIR)
                   terraform init
@@ -50,7 +75,8 @@ stages:
                 env:
                   AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
                   AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-                  AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
+                  AWS_SESSION_TOKEN: $(AWS_SESSION_TOKEN)
+                  AWS_DEFAULT_REGION: $(AWS_REGION)
 
               - script: |
                   cd $(TF_ROOT_DIR)
@@ -59,4 +85,5 @@ stages:
                 env:
                   AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
                   AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-                  AWS_DEFAULT_REGION: $(AWS_DEFAULT_REGION)
+                  AWS_SESSION_TOKEN: $(AWS_SESSION_TOKEN)
+                  AWS_DEFAULT_REGION: $(AWS_REGION)
