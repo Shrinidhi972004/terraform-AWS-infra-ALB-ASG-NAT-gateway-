@@ -160,4 +160,4 @@ Add your screenshots here after uploading them to the repository.
 - Private instances do not have public IPs.
 - Bastion hosts are the only direct SSH entry point.
 - The ALB is the only public entry point for application traffic.
-- The deployment is split into reusable modules so the same pattern can be reused in other environments.
+- The deployment is split into reusable modules so the same pattern can be reused in other environments
